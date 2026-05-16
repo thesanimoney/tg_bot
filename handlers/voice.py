@@ -38,6 +38,13 @@ async def handle_video_note(message: Message, bot: Bot) -> None:
     await _process_audio(message, bot, vn.file_id, vn.file_size, vn.duration, "video_note.mp4", "video/mp4", is_video=True)
 
 
+@router.message(F.video, ~F.business_connection_id)
+async def handle_video(message: Message, bot: Bot) -> None:
+    logger.info(f"[handle_video] from user={message.from_user.id}, chat={message.chat.id}")
+    v = message.video
+    await _process_audio(message, bot, v.file_id, v.file_size, v.duration, "video.mp4", v.mime_type or "video/mp4", is_video=True)
+
+
 @router.message(F.document, ~F.business_connection_id)
 async def handle_audio_document(message: Message, bot: Bot) -> None:
     logger.info(f"[handle_audio_document] from user={message.from_user.id}, chat={message.chat.id}, mime={message.document.mime_type}")
@@ -76,6 +83,15 @@ async def handle_business_video_note(message: Message, bot: Bot) -> None:
         return
     vn = message.video_note
     await _process_audio(message, bot, vn.file_id, vn.file_size, vn.duration, "video_note.mp4", "video/mp4", is_video=True)
+
+
+@router.business_message(F.video)
+async def handle_business_video(message: Message, bot: Bot) -> None:
+    logger.info(f"[handle_business_video] from user={message.from_user.id}, chat={message.chat.id}, biz_conn={message.business_connection_id}")
+    if _is_from_bot(message, bot):
+        return
+    v = message.video
+    await _process_audio(message, bot, v.file_id, v.file_size, v.duration, "video.mp4", v.mime_type or "video/mp4", is_video=True)
 
 
 @router.business_message(F.document)
@@ -203,12 +219,30 @@ async def _process_audio(
 
 
 async def _extract_audio_from_video(video_buffer: BytesIO) -> BytesIO:
+    import tempfile, os
+    tmp_in = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+    tmp_out = tempfile.NamedTemporaryFile(suffix=".ogg", delete=False)
+    tmp_in.write(video_buffer.read())
+    tmp_in.close()
+    tmp_out.close()
+    video_buffer.close()
+
     proc = await asyncio.create_subprocess_exec(
-        "ffmpeg", "-i", "pipe:0", "-vn", "-acodec", "libopus", "-f", "ogg", "pipe:1",
-        stdin=subprocess.PIPE,
+        "ffmpeg", "-y", "-i", tmp_in.name, "-vn", "-acodec", "libopus", tmp_out.name,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    stdout, _ = await proc.communicate(input=video_buffer.read())
-    video_buffer.close()
-    return BytesIO(stdout)
+    _, stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        logger.error(f"ffmpeg failed: {stderr.decode()}")
+        os.unlink(tmp_in.name)
+        os.unlink(tmp_out.name)
+        raise Exception("ffmpeg audio extraction failed")
+
+    with open(tmp_out.name, "rb") as f:
+        result = BytesIO(f.read())
+
+    os.unlink(tmp_in.name)
+    os.unlink(tmp_out.name)
+    return result
